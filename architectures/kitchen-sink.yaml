@@ -1,0 +1,35 @@
+apiVersion: agentfoundry/v1
+kind: Architecture
+name: kitchen-sink
+description: everything on - the configuration the field's priors predict is best
+  and the evidence says is not
+runtime:
+  backend: scripted
+models:
+  default:
+    provider: scripted
+    id: sim-high
+    effort: high
+action:
+  component: many-tools
+  params:
+    tool_count: 40
+context:
+  component: full-history
+memory:
+  component: project-persistent
+control:
+  component: staged
+  params:
+    stages:
+    - research
+    - plan
+    - implement
+    - review
+    max_returns: 2
+verification:
+  component: tests-plus-review
+budget:
+  max_tokens: 1200000
+  max_cost_usd: 12.0
+  max_turns: 140

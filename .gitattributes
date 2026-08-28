@@ -1,0 +1,4 @@
+# Identity in this project is the SHA-256 of file content. Line-ending
+# translation would change hashes across platforms, so pin LF everywhere.
+* text=auto eol=lf
+*.png binary

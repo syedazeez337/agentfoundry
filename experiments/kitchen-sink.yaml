@@ -1,0 +1,32 @@
+apiVersion: agentfoundry/v1
+kind: Experiment
+name: is-more-actually-better
+hypothesis: Stacking every component (research + plan + review + many tools + memory
+  + high effort) beats a minimal single-tool agent. The evidence predicts it does
+  not.
+design:
+  type: paired
+  arms:
+  - id: baseline
+    architecture: minimal-bash
+  - id: kitchen_sink
+    architecture: kitchen-sink
+  - id: no_verification
+    architecture: no-verification
+  suite: demo
+  replicates: 3
+analysis:
+  primary: resolved
+  secondary:
+  - cost_usd
+  - wall_s
+  cluster_on: task
+  test: cluster_bootstrap
+  equivalence_margin: 0.05
+  correction: benjamini_hochberg
+stopping:
+  rule: fixed
+  max_trials: 900
+budget:
+  max_cost_usd: 600.0
+  max_wall_h: 4

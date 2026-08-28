@@ -1,0 +1,38 @@
+apiVersion: agentfoundry/v1
+kind: Experiment
+name: does-a-review-stage-help
+hypothesis: Adding an adversarial review stage raises resolve rate by at least 10
+  points over a single-agent baseline, and the gain is not explained by the extra
+  budget it consumes.
+design:
+  type: paired
+  arms:
+  - id: baseline
+    architecture: minimal-bash
+  - id: candidate
+    architecture: review-stage
+  - id: cost_matched
+    architecture: minimal-bash
+    overrides:
+      budget:
+        max_tokens: 600000
+        max_cost_usd: 6.0
+        max_turns: 90
+  suite: demo
+  replicates: 3
+analysis:
+  primary: resolved
+  secondary:
+  - cost_usd
+  - wall_s
+  - integrity_flags
+  cluster_on: task
+  test: cluster_bootstrap
+  equivalence_margin: 0.05
+  correction: benjamini_hochberg
+stopping:
+  rule: fixed
+  max_trials: 900
+budget:
+  max_cost_usd: 50.0
+  max_wall_h: 4

@@ -1,0 +1,29 @@
+apiVersion: agentfoundry/v1
+kind: Architecture
+name: minimal-bash
+description: single agent, one tool, tests as verification
+runtime:
+  backend: scripted
+models:
+  default:
+    provider: scripted
+    id: sim-medium
+    effort: medium
+action:
+  component: bash-only
+  params:
+    stateful: false
+context:
+  component: full-history
+memory:
+  component: none
+control:
+  component: single
+  params:
+    max_turns: 60
+verification:
+  component: project-tests
+budget:
+  max_tokens: 400000
+  max_cost_usd: 4.0
+  max_turns: 60

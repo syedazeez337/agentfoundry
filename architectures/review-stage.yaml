@@ -1,0 +1,32 @@
+apiVersion: agentfoundry/v1
+kind: Architecture
+name: review-stage
+description: minimal-bash plus an adversarial review stage
+runtime:
+  backend: scripted
+models:
+  default:
+    provider: scripted
+    id: sim-medium
+    effort: medium
+action:
+  component: bash-only
+  params:
+    stateful: false
+context:
+  component: full-history
+memory:
+  component: none
+control:
+  component: staged
+  params:
+    stages:
+    - implement
+    - review
+    max_returns: 1
+verification:
+  component: project-tests
+budget:
+  max_tokens: 600000
+  max_cost_usd: 6.0
+  max_turns: 90

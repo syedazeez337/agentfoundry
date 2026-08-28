@@ -1,0 +1,30 @@
+[project]
+name = "agentfoundry"
+version = "0.1.0"
+description = "An experiment platform that makes agent-architecture claims falsifiable"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# Everything needed to drive a live agent against a real repository.
+real = [
+    "anthropic>=1.0",
+    "datasets>=3.0",          # SWE-bench-Live task import
+]
+# Convenience: install both.
+all = [
+    "anthropic>=1.0",
+    "datasets>=3.0",
+]
+
+[project.scripts]
+af = "af.cli.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["af"]
