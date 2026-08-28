@@ -314,17 +314,21 @@ def check_anthropic_sdk() -> Check:
 
 
 def check_api_keys() -> Check:
-    have = [k for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
-            if os.environ.get(k)]
-    if have:
-        return Check("provider credentials", REAL, PASS,
-                     ", ".join(f"{k} set" for k in have))
-    rc, out = _run(["ant", "auth", "status"], timeout=20)
-    if rc == 0 and "no active" not in out.lower():
-        return Check("provider credentials", REAL, PASS,
-                     "ant auth profile active")
+    """Delegates to af.auth so there is one credential resolver, not two."""
+    from af import auth
+
+    creds = [c for c in auth.resolve_all() if c.available]
+    # A local server being reachable is not evidence of a usable model provider.
+    remote = [c for c in creds if c.provider.api != auth.API_LOCAL]
+    if remote:
+        detail = ", ".join(f"{c.provider.name} ({c.source_detail or c.source})"
+                           for c in remote[:4])
+        if len(remote) > 4:
+            detail += f", +{len(remote) - 4} more"
+        return Check("provider credentials", REAL, PASS, detail,
+                     extra={"available": [c.provider.name for c in remote]})
     return Check("provider credentials", REAL, FAIL, "none found",
-                 "set ANTHROPIC_API_KEY, or run `ant auth login`")
+                 "af auth add <key>  (provider is inferred from the key)")
 
 
 def check_network() -> Check:

@@ -70,6 +70,7 @@ request as an implementation mandate.
 |---|---|---|
 | `tests/test_identity.py` | instant | canonical key sets, pinned hashes, order independence, replicate derivation |
 | `tests/test_pipeline.py` | ~15s | full stack: plan, schedule, execute, seal, grade, analyze, verdict, reindex |
+| `tests/test_auth.py` | instant | credential precedence, provider detection, redaction, registry integrity |
 
 Both were verified to catch the original failure: reintroducing a field in
 `TaskSpec.canonical()` fails `test_task_keys` and
@@ -90,6 +91,20 @@ the reason for this paragraph.
 `af doctor --tier core,simulator` is the pre-change check. Readiness is only
 reported for tiers that actually ran, so a filtered run cannot vacuously claim
 the others are fine.
+
+## Credentials
+
+`af/auth.py` is the only module that holds a raw key. Rules:
+
+- A key is **never** written into a bundle, manifest, event, log or verdict.
+  `auth.redact()` is the only representation that may be displayed.
+- The credential store lives at `~/.agentfoundry/auth.json`, deliberately
+  outside the repository so it cannot be committed. A test asserts this.
+- Precedence is fixed and reported: argument, environment, stored file, then a
+  provider CLI or cloud credential chain. `af auth status` shows which source
+  won, so a stale environment variable shadowing a stored key is visible.
+- `af auth verify` makes a real call. A set environment variable is not
+  evidence that a key works.
 
 ## Known parked work
 

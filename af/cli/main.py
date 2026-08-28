@@ -737,6 +737,104 @@ def cmd_doctor(args) -> int:
     return 0 if s["ready"]["simulator"] else 1
 
 
+def cmd_auth_add(args) -> int:
+    from af import auth
+
+    ctx = Ctx(args)
+    key = args.key
+    if not key:
+        import getpass
+
+        key = getpass.getpass("paste key (input hidden): ").strip()
+    try:
+        res = auth.add(key, provider=args.provider, base_url=args.base_url or "")
+    except ValueError as exc:
+        out(c(f"  {exc}", RED))
+        return 1
+    how = "detected" if res["detected"] else "specified"
+    out(f"  stored {c(res['provider'], BOLD)}  ({how})  {res['key']}")
+    out(f"  {c(res['path'], DIM)}")
+    if not args.no_verify:
+        v = auth.verify(res["provider"])
+        mark = c("ok", GREEN) if v.ok else c("FAIL", RED)
+        extra = f", {v.models_seen} models" if v.models_seen else ""
+        out(f"  verify  {mark}  {v.detail}{extra}")
+        return 0 if v.ok else 1
+    return 0
+
+
+def cmd_auth_status(args) -> int:
+    from af import auth
+
+    ctx = Ctx(args)
+    creds = auth.resolve_all()
+    if not args.all:
+        creds = [x for x in creds if x.available]
+    if not creds:
+        out(f"  no credentials found. {c('af auth add <key>', BOLD)}")
+        return 1
+    out(f"  {'provider':<16}{'source':<18}{'key':<28}base url")
+    for cr in creds:
+        mark = GREEN if cr.available else DIM
+        src = cr.source_detail or cr.source
+        out(f"  {c(cr.provider.name, mark):<16}"
+            f"{c(src[:16], DIM):<18}"
+            f"{auth.redact(cr.key):<28}"
+            f"{c(cr.base_url, DIM)}")
+        if not cr.available and cr.missing:
+            out(f"      {c('set ' + ' or '.join(cr.missing), YELLOW)}")
+    out(f"  {sum(1 for x in creds if x.available)} available")
+    emit([x.to_dict() for x in creds], ctx.json)
+    return 0
+
+
+def cmd_auth_verify(args) -> int:
+    from af import auth
+
+    ctx = Ctx(args)
+    targets = ([args.provider] if args.provider
+               else auth.available_providers())
+    if not targets:
+        out("  nothing to verify")
+        return 1
+    rc = 0
+    results = []
+    for name in targets:
+        v = auth.verify(name)
+        results.append(v.to_dict())
+        mark = c("ok", GREEN) if v.ok else c("FAIL", RED)
+        extra = f"  {v.models_seen} models" if v.models_seen else ""
+        out(f"  {mark:<14} {name:<16} {c(v.detail, DIM)}{extra}")
+        rc |= 0 if v.ok else 1
+    emit(results, ctx.json)
+    return rc
+
+
+def cmd_auth_remove(args) -> int:
+    from af import auth
+
+    Ctx(args)
+    if auth.remove_key(args.provider):
+        out(f"  removed stored key for {args.provider}")
+        return 0
+    out(f"  no stored key for {args.provider}")
+    return 1
+
+
+def cmd_auth_providers(args) -> int:
+    from af import auth
+
+    ctx = Ctx(args)
+    out(f"  {'provider':<16}{'api':<20}{'env':<44}prefixes")
+    for p in auth.PROVIDERS:
+        env = ", ".join(p.env) or c(p.note or "-", DIM)
+        pref = ", ".join(p.prefixes) or "-"
+        out(f"  {p.name:<16}{p.api:<20}{env[:42]:<44}{c(pref, DIM)}")
+    out(f"  {len(auth.PROVIDERS)} providers")
+    emit([p.__dict__ for p in auth.PROVIDERS], ctx.json)
+    return 0
+
+
 def cmd_serve(args) -> int:
     from af.api import serve
 
@@ -861,6 +959,24 @@ def build_parser() -> argparse.ArgumentParser:
     sr.add_argument("--proposers", default="mutation,finding-driven")
     sr.set_defaults(fn=cmd_search_race)
     s.add_parser("archive").set_defaults(fn=cmd_search_archive)
+
+    au = sub.add_parser("auth").add_subparsers(dest="sub")
+    aa = au.add_parser("add", help="store a key; provider inferred if omitted")
+    aa.add_argument("key", nargs="?", help="omit to be prompted without echo")
+    aa.add_argument("--provider", help="override detection")
+    aa.add_argument("--base-url", dest="base_url")
+    aa.add_argument("--no-verify", action="store_true")
+    aa.set_defaults(fn=cmd_auth_add)
+    ast = au.add_parser("status")
+    ast.add_argument("--all", action="store_true", help="include unavailable")
+    ast.set_defaults(fn=cmd_auth_status)
+    av = au.add_parser("verify")
+    av.add_argument("provider", nargs="?")
+    av.set_defaults(fn=cmd_auth_verify)
+    ar = au.add_parser("remove")
+    ar.add_argument("provider")
+    ar.set_defaults(fn=cmd_auth_remove)
+    au.add_parser("providers").set_defaults(fn=cmd_auth_providers)
 
     sv = sub.add_parser("serve")
     sv.add_argument("--port", type=int, default=8787)
