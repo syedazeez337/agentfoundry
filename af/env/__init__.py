@@ -124,9 +124,16 @@ class LocalSandbox:
             "AF_SANDBOX": "1",
         })
         if h.meta.get("net") == "deny":
-            env["no_proxy"] = "*"
-            env["HTTP_PROXY"] = "http://127.0.0.1:9"
-            env["HTTPS_PROXY"] = "http://127.0.0.1:9"
+            # Route every protocol at a closed port. `no_proxy` is deliberately
+            # set EMPTY: `no_proxy="*"` means "bypass the proxy for all hosts",
+            # which silently turned this block into a no-op and let trials reach
+            # the network while their integrity record claimed otherwise.
+            dead = "http://127.0.0.1:9"
+            for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                        "http_proxy", "https_proxy", "all_proxy"):
+                env[var] = dead
+            env["no_proxy"] = ""
+            env["NO_PROXY"] = ""
         try:
             p = subprocess.run(
                 argv, cwd=str(h.workdir), capture_output=True, text=True,

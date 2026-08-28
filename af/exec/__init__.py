@@ -217,6 +217,11 @@ def run_trial(
         handle = sandbox.start(task.fixture_dir, limits, net)
 
         before = sandbox.snapshot(handle)
+        # State HOW each control is enforced, not just that it was requested.
+        # "network_mode: deny" alone was a claim the local sandbox could not
+        # back up, and it was recorded on every trial while the block was a
+        # no-op.
+        kernel_enforced = sandbox.kind == "docker"
         integrity["env_assertions"] = {
             "fixture_digest_matches": True,
             "no_git_history": not (handle.workdir / ".git").exists(),
@@ -224,8 +229,12 @@ def run_trial(
                 "solution" in p or "held_out" in p for p in before
             ),
             "network_mode": net.mode,
+            "network_enforcement": (
+                "kernel" if kernel_enforced else "proxy-env (best effort)"),
             "sandbox_kind": sandbox.kind,
-            "is_security_boundary": sandbox.kind == "docker",
+            "is_security_boundary": kernel_enforced,
+            "filesystem_confinement": (
+                "kernel" if kernel_enforced else "convention (scratch dir)"),
         }
 
         sink.emit("run.start", task_id=task.id, arch=resolved.arch_hash[:12],
