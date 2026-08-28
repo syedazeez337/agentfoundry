@@ -699,17 +699,20 @@ def cmd_backends(args) -> int:
 
 
 def cmd_doctor(args) -> int:
-    from af.doctor import CORE, FAIL, PASS, REAL, SIM, SKIP, WARN, run_all, summarize
+    from af.doctor import (
+        CORE, FAIL, INFO, OPT, PASS, REAL, SIM, SKIP, WARN, run_all, summarize)
 
     ctx = Ctx(args)
-    tiers = tuple(t.strip() for t in args.tier.split(",")) if args.tier else (CORE, SIM, REAL)
+    tiers = (tuple(t.strip() for t in args.tier.split(","))
+             if args.tier else (CORE, SIM, REAL, OPT))
     checks = run_all(ctx.root, tiers)
-    colours = {PASS: GREEN, WARN: YELLOW, FAIL: RED, SKIP: DIM}
+    colours = {PASS: GREEN, WARN: YELLOW, FAIL: RED, SKIP: DIM, INFO: CYAN}
     labels = {CORE: "core (run anything)",
               SIM: "simulator (af demo run)",
-              REAL: "real runs (live agent on a real repo)"}
+              REAL: "real runs (live agent on a real repo)",
+              OPT: "optional (widens what is possible, never blocking)"}
 
-    for tier in (CORE, SIM, REAL):
+    for tier in (CORE, SIM, REAL, OPT):
         group = [c for c in checks if c.tier == tier]
         if not group:
             continue

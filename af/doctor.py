@@ -1,13 +1,19 @@
 """Dependency and environment audit.
 
-Three tiers, because the answers differ:
+Four tiers, because the answers differ:
 
   core      - needed to run anything at all
   simulator - needed for `af demo run` (no keys, no containers)
   real      - needed to drive an actual coding agent on a real repository
+  optional  - capabilities that widen what is possible, never blockers
 
-A check reports PASS / WARN / FAIL plus the exact remedy. Nothing here mutates
-the system.
+Docker sits in `optional` on purpose. It provides kernel-level isolation and
+access to prebuilt benchmark images, but a real repository can be cloned at a
+pinned commit and its test suite reconstructed with `uv` in about nine seconds.
+Reporting it as a hard requirement was wrong and this module used to do it.
+
+A check reports PASS / WARN / FAIL / SKIP / INFO plus the exact remedy. INFO is
+never a blocker. Nothing here mutates the system.
 """
 
 from __future__ import annotations
@@ -20,8 +26,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-PASS, WARN, FAIL, SKIP = "PASS", "WARN", "FAIL", "SKIP"
-CORE, SIM, REAL = "core", "simulator", "real"
+PASS, WARN, FAIL, SKIP, INFO = "PASS", "WARN", "FAIL", "SKIP", "INFO"
+CORE, SIM, REAL, OPT = "core", "simulator", "real", "optional"
 
 
 @dataclass
@@ -240,34 +246,44 @@ def check_git() -> Check:
     path = shutil.which("git")
     if not path:
         return Check("git", REAL, FAIL, "not found",
-                     "install git - needed for patch extraction and history "
-                     "sanitisation on real repositories")
+                     "install git - needed to clone task fixtures, extract "
+                     "patches, and truncate history so the gold patch is not "
+                     "on disk")
     rc, out = _run(["git", "--version"])
     return Check("git", REAL, PASS if rc == 0 else FAIL, out, extra={"path": path})
 
 
 def check_docker() -> Check:
+    """Docker is an option, not a requirement.
+
+    Measured: a real repository can be cloned at a pinned commit and its test
+    suite reconstructed with `uv` in about nine seconds and sixteen megabytes.
+    Containers solve dependency reconstruction across heterogeneous repos, and
+    they give kernel-level isolation. Neither is required to run AgentFoundry.
+    """
     path = shutil.which("docker")
     if not path:
         return Check(
-            "docker CLI", REAL, FAIL, "not found",
-            "install Docker Desktop (WSL2 backend). Required for real runs: "
-            "task images are prebuilt containers, and process isolation is not "
-            "a security boundary for untrusted repository code.")
+            "docker CLI", OPT, INFO, "not installed",
+            "optional. Enables --sandbox docker (kernel-level network and "
+            "filesystem isolation) and prebuilt benchmark images. Without it "
+            "the local sandbox is used, which is a lifecycle boundary and not "
+            "a security one.")
     rc, out = _run(["docker", "--version"])
-    return Check("docker CLI", REAL, PASS if rc == 0 else FAIL, out,
+    return Check("docker CLI", OPT, PASS if rc == 0 else INFO, out,
                  extra={"path": path})
 
 
 def check_docker_daemon() -> Check:
     if not shutil.which("docker"):
-        return Check("docker daemon", REAL, SKIP, "docker CLI absent")
+        return Check("docker daemon", OPT, SKIP, "docker CLI absent")
     rc, out = _run(["docker", "info", "--format",
                     "{{.ServerVersion}}|{{.OSType}}|{{.Architecture}}|{{.NCPU}}|{{.MemTotal}}"],
                    timeout=45)
     if rc != 0:
-        return Check("docker daemon", REAL, FAIL, out.splitlines()[0] if out else "unreachable",
-                     "start Docker Desktop")
+        return Check("docker daemon", OPT, INFO,
+                     out.splitlines()[0] if out else "unreachable",
+                     "start Docker Desktop to use --sandbox docker")
     parts = out.strip().split("|")
     detail = out.strip()
     extra = {}
@@ -286,20 +302,35 @@ def check_docker_daemon() -> Check:
         elif mem_gb and mem_gb < 8:
             status = WARN
             remedy = "allocate 16GB to Docker Desktop for real task images"
-    return Check("docker daemon", REAL, status, detail, remedy, extra)
+    return Check("docker daemon", OPT, status, detail, remedy, extra)
 
 
 def check_wsl() -> Check:
     if sys.platform != "win32":
-        return Check("wsl2", REAL, SKIP, "not Windows")
+        return Check("wsl2", OPT, SKIP, "not Windows")
     if not shutil.which("wsl"):
-        return Check("wsl2", REAL, WARN, "wsl not found",
-                     "Docker Desktop needs the WSL2 backend on Windows")
+        return Check("wsl2", OPT, INFO, "wsl not found",
+                     "only needed if you want Docker Desktop on Windows")
     rc, out = _run(["wsl", "--status"], timeout=30)
     txt = out.replace("\x00", "")
     ok = "2" in txt
-    return Check("wsl2", REAL, PASS if ok else WARN,
+    return Check("wsl2", OPT, PASS if ok else INFO,
                  " ".join(txt.split())[:80] or "present")
+
+
+def check_uv() -> Check:
+    """`uv` reconstructs a real repository's environment without a container.
+
+    This is the mechanism that makes Docker optional rather than required.
+    """
+    path = shutil.which("uv")
+    if not path:
+        return Check("uv", REAL, FAIL, "not found",
+                     "install uv - it builds per-task Python environments, "
+                     "which is what replaces prebuilt container images")
+    rc, out = _run(["uv", "--version"])
+    return Check("uv", REAL, PASS if rc == 0 else FAIL, out,
+                 extra={"path": path})
 
 
 def check_anthropic_sdk() -> Check:
@@ -372,7 +403,8 @@ def check_hf_datasets() -> Check:
 # ------------------------------------------------------------------- runner
 
 
-def run_all(root: Path, tiers: tuple[str, ...] = (CORE, SIM, REAL)) -> list[Check]:
+def run_all(root: Path,
+            tiers: tuple[str, ...] = (CORE, SIM, REAL, OPT)) -> list[Check]:
     checks: list[Check] = []
     if CORE in tiers:
         checks += [check_python(), check_pyyaml(), check_stdlib(),
@@ -381,9 +413,10 @@ def run_all(root: Path, tiers: tuple[str, ...] = (CORE, SIM, REAL)) -> list[Chec
         checks += [check_local_sandbox(root), check_unittest_runner(),
                    check_backends(), check_resources()]
     if REAL in tiers:
-        checks += [check_git(), check_docker(), check_docker_daemon(),
-                   check_wsl(), check_anthropic_sdk(), check_api_keys(),
-                   check_network(), check_hf_datasets()]
+        checks += [check_git(), check_uv(), check_anthropic_sdk(),
+                   check_api_keys(), check_network(), check_hf_datasets()]
+    if OPT in tiers:
+        checks += [check_docker(), check_docker_daemon(), check_wsl()]
     return checks
 
 
@@ -395,12 +428,15 @@ def summarize(checks: list[Check]) -> dict:
     """
     by_tier: dict[str, dict[str, int]] = {}
     for c in checks:
-        t = by_tier.setdefault(c.tier, {PASS: 0, WARN: 0, FAIL: 0, SKIP: 0})
-        t[c.status] += 1
+        t = by_tier.setdefault(
+            c.tier, {PASS: 0, WARN: 0, FAIL: 0, SKIP: 0, INFO: 0})
+        t[c.status] = t.get(c.status, 0) + 1
 
     ran = set(by_tier)
+    # INFO is never a blocker: it describes an optional capability.
     ok = lambda tiers: all(  # noqa: E731
-        c.status in (PASS, WARN, SKIP) for c in checks if c.tier in tiers)
+        c.status in (PASS, WARN, SKIP, INFO)
+        for c in checks if c.tier in tiers)
 
     ready: dict[str, bool | None] = {}
     ready["simulator"] = ok({CORE, SIM}) if {CORE, SIM} <= ran else None

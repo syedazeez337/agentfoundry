@@ -142,5 +142,7 @@ config, no code changes above L1:
 Docker stays supported and stays optional. It becomes the answer to "I want
 SWE-bench-Live's exact images," not a prerequisite for using the tool.
 
-`af doctor` should reflect this: Docker moves from FAIL to an informational
-line, because the real-run tier no longer depends on it.
+`af doctor` reflects this as of commit 44bb976: Docker and WSL moved to an
+`optional` tier reporting INFO, and `uv` was added to the `real` tier as the
+thing that actually replaces prebuilt images. With a provider key and no Docker
+installed, `real_runs` reports READY. `tests/test_doctor.py` asserts it.

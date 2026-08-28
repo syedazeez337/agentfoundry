@@ -71,6 +71,8 @@ request as an implementation mandate.
 | `tests/test_identity.py` | instant | canonical key sets, pinned hashes, order independence, replicate derivation |
 | `tests/test_pipeline.py` | ~15s | full stack: plan, schedule, execute, seal, grade, analyze, verdict, reindex |
 | `tests/test_auth.py` | instant | credential precedence, provider detection, redaction, registry integrity |
+| `tests/test_sandbox.py` | ~6s | network denial actually denies, workspace isolation, timeouts, no shell interpolation |
+| `tests/test_doctor.py` | ~3s | tier assignment, readiness logic, checks execute rather than guess |
 
 Both were verified to catch the original failure: reintroducing a field in
 `TaskSpec.canonical()` fails `test_task_keys` and
@@ -105,6 +107,30 @@ the others are fine.
   won, so a stale environment variable shadowing a stored key is visible.
 - `af auth verify` makes a real call. A set environment variable is not
   evidence that a key works.
+
+## Isolation
+
+The default sandbox is `local`: a fresh temp directory per trial, subprocess
+execution with an explicit argv list, and a scrubbed environment. It is a
+lifecycle boundary, not a security one, and every bundle records that.
+
+`--sandbox docker` adds kernel-level network and filesystem isolation. It is
+**optional**. A real repository can be cloned at a pinned commit and its test
+suite reconstructed with `uv` in about nine seconds, so containers buy
+isolation and prebuilt images, not basic capability.
+
+Controls now state how they are enforced, because one of them did not work:
+
+| Control | local | docker |
+|---|---|---|
+| fresh state per trial | real | real |
+| filesystem confinement | convention | kernel |
+| network denial | proxy env (best effort) | kernel |
+
+Network denial was a **no-op** until commit 44bb976: `no_proxy="*"` bypassed the
+dead-port proxy for every host while bundles recorded `network_mode: deny`.
+`tests/test_sandbox.py` now exercises the control rather than reading the
+setting.
 
 ## Known parked work
 
