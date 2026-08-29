@@ -10,12 +10,10 @@ REWARD_HACK.
 
 from __future__ import annotations
 
-import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from pathlib import Path
 
-from af.evidence import Bundle, iter_bundles
+from af.evidence import Bundle
 from af.util import hash_obj, now_iso
 
 # ------------------------------------------------------------------ taxonomy
@@ -317,7 +315,7 @@ def autopsy(b: Bundle, score: dict | None = None) -> dict:
         "flags": (score or {}).get("flags", []),
         "credibility": (score or {}).get("credibility"),
         "features": f.to_dict(),
-        "diagnoses": [l.to_dict() for l in labels],
+        "diagnoses": [d.to_dict() for d in labels],
         "calibration": CALIBRATION,
         "created_at": now_iso(),
     }

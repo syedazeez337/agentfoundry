@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import shutil
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, Protocol
+from typing import Protocol
 
 from af.env import Handle, Limits, NetPolicy, Sandbox, make_sandbox
-from af.evidence import BundleWriter
+from af.evidence import BundleWriter, Event, read_events
+from af.evidence.redaction import redact_json
 from af.spec.models import EnvironmentSpec, TaskSpec, TrialSpec
 from af.spec.registry import ResolvedArchitecture, resolve
 from af.util import now_iso, now_ts, unified_diff
@@ -18,6 +20,8 @@ from af.util import now_iso, now_ts, unified_diff
 # -------------------------------------------------------------------- events
 # Vocabulary follows OpenTelemetry GenAI attribute names so adapters over real
 # harnesses are cheap: most of them already emit these.
+
+__all__ = ["Event", "read_events"]  # re-exported: the format lives in af.evidence
 
 EVENT_TYPES = (
     "run.start", "run.end",
@@ -33,39 +37,31 @@ EVENT_TYPES = (
 )
 
 
-@dataclass
-class Event:
-    seq: int
-    ts: str
-    type: str
-    agent_id: str = "root"
-    parent_agent_id: str | None = None
-    attrs: dict = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        return {
-            "seq": self.seq,
-            "ts": self.ts,
-            "type": self.type,
-            "agent_id": self.agent_id,
-            "parent_agent_id": self.parent_agent_id,
-            "attrs": self.attrs,
-        }
-
-
 class EventSink:
-    """Monotonic seq per trial. seq is what every analysis method indexes on."""
+    """Monotonic seq per trial. seq is what every analysis method indexes on.
 
-    def __init__(self, path: Path):
+    Attributes are redacted on the way in. A bundle is meant to be shareable,
+    and an event log carries model output and agent-chosen shell commands -
+    both places a key can surface. Scrubbing on write means it does not depend
+    on every future reader remembering to.
+    """
+
+    def __init__(self, path: Path, redact: bool = True):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = self.path.open("w", encoding="utf-8", newline="\n")
         self._seq = 0
+        self._redact = redact
         self.count_by_type: dict[str, int] = {}
+        self.redactions: dict[str, int] = {}
 
     def emit(self, type: str, agent_id: str = "root",
              parent_agent_id: str | None = None, **attrs) -> Event:
         self._seq += 1
+        if self._redact:
+            attrs, matched = redact_json(attrs)
+            for kind in matched:
+                self.redactions[kind] = self.redactions.get(kind, 0) + 1
         ev = Event(self._seq, now_iso(), type, agent_id, parent_agent_id, attrs)
         self._fh.write(json.dumps(ev.to_dict(), ensure_ascii=False) + "\n")
         self._fh.flush()
@@ -75,19 +71,8 @@ class EventSink:
     def close(self) -> None:
         try:
             self._fh.close()
-        except Exception:
+        except Exception:  # noqa: S110 - close failures cannot be acted on
             pass
-
-
-def read_events(path: Path) -> Iterator[Event]:
-    with Path(path).open(encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            d = json.loads(line)
-            yield Event(d["seq"], d["ts"], d["type"], d.get("agent_id", "root"),
-                        d.get("parent_agent_id"), d.get("attrs") or {})
 
 
 # ------------------------------------------------------------------ backend
@@ -168,6 +153,34 @@ def conformance_check(backend: Backend) -> list[str]:
 # ------------------------------------------------------------- supervisor
 
 
+class EnforcementError(RuntimeError):
+    """The environment required an isolation level the sandbox cannot provide."""
+
+
+def merge_integrity(base: dict, *sources: dict) -> dict:
+    """Fold backend-reported integrity into the supervisor's record.
+
+    A backend may report through `invoke()`'s outcome, through `collect()`, or
+    both, so both are read. Lists are unioned rather than overwritten, and an
+    empty value never replaces a populated one: the failure this exists to
+    prevent is a `collect()` returning `{"git_ops": []}` and silently erasing
+    what `invoke()` actually observed, which is exactly what happened and left
+    the oracle-access channel dead while looking wired.
+    """
+    out = dict(base)
+    for src in sources:
+        for key, val in (src or {}).items():
+            if isinstance(val, list):
+                merged = list(out.get(key) or [])
+                for item in val:
+                    if item not in merged:
+                        merged.append(item)
+                out[key] = merged
+            elif val or key not in out:
+                out[key] = val
+    return out
+
+
 def run_trial(
     trial: TrialSpec,
     task: TaskSpec,
@@ -181,16 +194,35 @@ def run_trial(
 
     Content addressing buys caching for free: an identical TrialSpec + nonce
     that is already sealed is evidence we already own, so we return it instead
-    of paying for it again.
+    of paying for it again - but only when it is *evidence*. A bundle sealed
+    with status="error" records an infrastructure failure, not an agent run;
+    returning it would memoise a provider outage as a result forever and make
+    any retry policy unimplementable. Those are re-run.
     """
     from af.evidence import Bundle
 
     existing = Path(bundles_root) / trial.trial_key
     if (existing / "SEALED").exists():
-        return existing
+        if Bundle(existing).ok:
+            return existing
+        shutil.rmtree(existing, ignore_errors=True)
 
     backend = get_backend(arch.backend)
     resolved = resolve(arch, backend.capabilities())
+
+    # Check the isolation requirement before opening a bundle or spending a
+    # cent. A trial that needed a boundary it cannot get is not a weaker trial,
+    # it is a different trial, and running it would produce a number nobody
+    # should read.
+    sandbox = make_sandbox(sandbox_kind)
+    net = NetPolicy(mode=env.net, allowlist=tuple(env.allowlist))
+    enforcement = sandbox.enforcement(net)
+    required = getattr(env, "require_enforcement", "none")
+    if not enforcement.meets(required):
+        raise EnforcementError(
+            f"environment requires enforcement={required!r} but sandbox "
+            f"{sandbox.kind!r} provides {enforcement.to_dict()}"
+        )
 
     writer = BundleWriter(Path(bundles_root) / trial.trial_key)
     writer.open(
@@ -206,22 +238,20 @@ def run_trial(
         }
     )
     sink = EventSink(writer.dir / "events.jsonl")
-    sandbox = make_sandbox(sandbox_kind)
     handle = None
     t0 = now_ts()
     integrity: dict = {"env_assertions": {}, "network": [], "git_ops": []}
 
     try:
         limits = Limits(wall_s=int(trial.budget.get("max_wall_s", 1800)))
-        net = NetPolicy(mode=env.net, allowlist=tuple(env.allowlist))
         handle = sandbox.start(task.fixture_dir, limits, net)
 
         before = sandbox.snapshot(handle)
         # State HOW each control is enforced, not just that it was requested.
-        # "network_mode: deny" alone was a claim the local sandbox could not
-        # back up, and it was recorded on every trial while the block was a
-        # no-op.
-        kernel_enforced = sandbox.kind == "docker"
+        # The sandbox declares its own strength per axis; this layer records the
+        # declaration rather than inferring one. "network_mode: deny" alone was a
+        # claim the local sandbox could not back up, and it was recorded on every
+        # trial while the block was a no-op.
         integrity["env_assertions"] = {
             "fixture_digest_matches": True,
             "no_git_history": not (handle.workdir / ".git").exists(),
@@ -229,12 +259,12 @@ def run_trial(
                 "solution" in p or "held_out" in p for p in before
             ),
             "network_mode": net.mode,
-            "network_enforcement": (
-                "kernel" if kernel_enforced else "proxy-env (best effort)"),
+            "network_enforcement": enforcement.network,
+            "filesystem_confinement": enforcement.filesystem,
+            "is_security_boundary": enforcement.is_security_boundary,
             "sandbox_kind": sandbox.kind,
-            "is_security_boundary": kernel_enforced,
-            "filesystem_confinement": (
-                "kernel" if kernel_enforced else "convention (scratch dir)"),
+            "required_enforcement": required,
+            "enforcement_satisfied": enforcement.meets(required),
         }
 
         sink.emit("run.start", task_id=task.id, arch=resolved.arch_hash[:12],
@@ -256,7 +286,12 @@ def run_trial(
             p for p in set(before) | set(after) if before.get(p) != after.get(p)
         )
         integrity["events_by_type"] = dict(sink.count_by_type)
-        integrity.update(raw.get("integrity") or {})
+        integrity["redactions"] = dict(sink.redactions)
+        integrity = merge_integrity(
+            integrity,
+            (outcome.raw or {}).get("integrity") or {},
+            (raw or {}).get("integrity") or {},
+        )
 
         writer.write_text("patch.diff", diff)
         writer.write_json("usage.json", {
@@ -265,15 +300,21 @@ def run_trial(
             "stopped_reason": outcome.stopped_reason,
         })
         writer.write_json("integrity.json", integrity)
-        writer.write_json("raw/backend.json", raw)
+        writer.write_json("raw/backend.json",
+                          {"collect": raw, "outcome": outcome.raw})
         writer.write_json("workspace_after.json", after)
         writer.seal(status="ok" if outcome.error is None else "error",
                     error=outcome.error)
 
     except Exception as exc:  # noqa: BLE001
         sink.emit("error", message=str(exc), traceback=traceback.format_exc()[-4000:])
+        # A trial that died partway may well have spent money before it died.
+        # Recording that as 0.0 would make the budget cap under-count exactly
+        # the trials that break it, so cost is recorded as unknown instead.
         writer.write_json("usage.json", {"wall_s": round(now_ts() - t0, 3),
-                                         "stopped_reason": "error"})
+                                         "stopped_reason": "error",
+                                         "cost_usd": None,
+                                         "usage_unknown": True})
         writer.write_json("integrity.json", integrity)
         writer.seal(status="error", error=str(exc))
     finally:

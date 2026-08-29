@@ -1,12 +1,18 @@
 """Environment layer: sandboxes.
 
-One protocol, three implementations. Nothing above L1 knows which is in use.
-Hard rules enforced here and asserted into integrity.json:
+One protocol, two implementations. Nothing above L1 knows which is in use.
+
+The rules this layer is responsible for:
   - fixture is a pinned digest, never a tag
   - no gold patch on disk, no upstream git history
   - network deny-by-default
   - held-out tests injected only after the workspace is captured
   - every trial starts from a clean copy; no container reuse
+
+A sandbox does not get to *claim* those rules; it declares, per axis, how
+strongly it can enforce each one, and `enforcement()` is what lands in
+integrity.json. A requested control that a sandbox cannot enforce is recorded as
+unenforced rather than asserted as true. See `Enforcement`.
 """
 
 from __future__ import annotations
@@ -59,6 +65,69 @@ class NetPolicy:
     allowlist: tuple = ()
 
 
+# ------------------------------------------------------------- enforcement
+
+# How strongly a control is actually backed, from strongest to weakest. This
+# vocabulary is the whole point: "requested" and "enforced" are different facts
+# and the evidence bundle records the second one.
+KERNEL = "kernel"          # the OS refuses the operation
+ADVISORY = "advisory"      # only cooperating software honours it
+UNENFORCED = "unenforced"  # requested, nothing backs it
+NOT_REQUESTED = "not_requested"
+
+ENFORCEMENT_RANK = {NOT_REQUESTED: 0, UNENFORCED: 0, ADVISORY: 1, KERNEL: 2}
+
+
+@dataclass(frozen=True)
+class Enforcement:
+    """What a sandbox can actually back, per axis.
+
+    Modelled on a three-axis intent vocabulary rather than per-backend flags, so
+    a control's strength is comparable across sandboxes and can be checked
+    against an experiment's requirement before any money is spent.
+    """
+
+    filesystem: str
+    network: str
+    is_security_boundary: bool
+
+    def to_dict(self) -> dict:
+        return {
+            "filesystem": self.filesystem,
+            "network": self.network,
+            "is_security_boundary": self.is_security_boundary,
+        }
+
+    def meets(self, required: str) -> bool:
+        """Does every axis reach `required`? `none` requires nothing."""
+        if required in (None, "", "none"):
+            return True
+        want = ENFORCEMENT_RANK.get(required)
+        if want is None:
+            raise ValueError(f"unknown enforcement level {required!r}")
+        return all(ENFORCEMENT_RANK.get(axis, 0) >= want
+                   for axis in (self.filesystem, self.network))
+
+
+class ContainmentError(RuntimeError):
+    """A path escaped the workspace root."""
+
+
+def contained_path(root: Path, rel: str) -> Path:
+    """Resolve `rel` under `root`, refusing anything that escapes.
+
+    Normalise to absolute, then require the workspace root to be a strict
+    prefix. `put`/`get` take relative paths from callers that may be driven by
+    agent output, so this is the only thing standing between a `../` and the
+    rest of the filesystem.
+    """
+    root = Path(root).resolve()
+    target = (root / rel).resolve()
+    if target != root and root not in target.parents:
+        raise ContainmentError(f"path {rel!r} escapes workspace {root}")
+    return target
+
+
 @dataclass
 class Handle:
     id: str
@@ -70,6 +139,7 @@ class Handle:
 class Sandbox(Protocol):
     kind: str
 
+    def enforcement(self, net: NetPolicy) -> Enforcement: ...
     def start(self, fixture: Path, limits: Limits, net: NetPolicy) -> Handle: ...
     def exec(self, h: Handle, argv: list[str], timeout: int = 120) -> ExecResult: ...
     def put(self, h: Handle, src: Path, dst: str) -> None: ...
@@ -92,6 +162,17 @@ class LocalSandbox:
 
     def __init__(self, base: Path | None = None):
         self.base = Path(base) if base else None
+
+    def enforcement(self, net: NetPolicy) -> Enforcement:
+        # Proxy env vars are advisory and nothing more: they stop a cooperating
+        # HTTP client and do not stop a raw socket, a DNS lookup, ssh, or
+        # `curl --noproxy`. Saying "advisory" is the difference between a record
+        # that is useful and a record that is false.
+        return Enforcement(
+            filesystem=ADVISORY,   # a scratch dir the child is merely pointed at
+            network=ADVISORY if net.mode == "deny" else NOT_REQUESTED,
+            is_security_boundary=False,
+        )
 
     def start(self, fixture: Path, limits: Limits, net: NetPolicy) -> Handle:
         parent = str(self.base) if self.base else None
@@ -147,7 +228,7 @@ class LocalSandbox:
             return ExecResult(argv, 127, "", str(e), time.time() - t0)
 
     def put(self, h: Handle, src: Path, dst: str) -> None:
-        target = h.workdir / dst
+        target = contained_path(h.workdir, dst)
         target.parent.mkdir(parents=True, exist_ok=True)
         if Path(src).is_dir():
             shutil.copytree(src, target, dirs_exist_ok=True)
@@ -155,7 +236,7 @@ class LocalSandbox:
             shutil.copy2(src, target)
 
     def get(self, h: Handle, src: str) -> bytes:
-        return (h.workdir / src).read_bytes()
+        return contained_path(h.workdir, src).read_bytes()
 
     def snapshot(self, h: Handle) -> dict[str, str]:
         return snapshot_tree(h.workdir)
@@ -180,6 +261,15 @@ class DockerSandbox:
 
     def __init__(self, image: str = "python:3.12-slim"):
         self.image = image
+
+    def enforcement(self, net: NetPolicy) -> Enforcement:
+        # `--network none` removes the interface; the bind mount is the only
+        # writable path. Both are refused by the kernel, not by convention.
+        return Enforcement(
+            filesystem=KERNEL,
+            network=KERNEL if net.mode == "deny" else NOT_REQUESTED,
+            is_security_boundary=True,
+        )
 
     def available(self) -> bool:
         try:
@@ -220,7 +310,7 @@ class DockerSandbox:
         LocalSandbox().put(h, src, dst)
 
     def get(self, h: Handle, src: str) -> bytes:
-        return (h.workdir / src).read_bytes()
+        return contained_path(h.workdir, src).read_bytes()
 
     def snapshot(self, h: Handle) -> dict[str, str]:
         return snapshot_tree(h.workdir)

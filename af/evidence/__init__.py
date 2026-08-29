@@ -8,20 +8,58 @@ is in the right place.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from collections.abc import Iterator
 
 from af.util import now_iso, read_json, write_atomic, write_json
 
 SEAL = "SEALED"
 
 
+# ---------------------------------------------------------------- event log
+# The event record is part of the bundle format, so it lives with the format.
+# It used to live in af.exec, which meant a bundle could not read its own
+# events without importing the execution layer - a cycle that the layering
+# check found and that only a deferred import was hiding.
+
+
+@dataclass
+class Event:
+    seq: int
+    ts: str
+    type: str
+    agent_id: str = "root"
+    parent_agent_id: str | None = None
+    attrs: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "seq": self.seq,
+            "ts": self.ts,
+            "type": self.type,
+            "agent_id": self.agent_id,
+            "parent_agent_id": self.parent_agent_id,
+            "attrs": self.attrs,
+        }
+
+
+def read_events(path: Path) -> Iterator[Event]:
+    with Path(path).open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            d = json.loads(line)
+            yield Event(d["seq"], d["ts"], d["type"], d.get("agent_id", "root"),
+                        d.get("parent_agent_id"), d.get("attrs") or {})
+
+
 class BundleWriter:
     def __init__(self, dir: Path):
         self.dir = Path(dir)
 
-    def open(self, manifest: dict) -> "BundleWriter":
+    def open(self, manifest: dict) -> BundleWriter:
         if (self.dir / SEAL).exists():
             raise RuntimeError(f"bundle already sealed: {self.dir}")
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -78,6 +116,17 @@ class Bundle:
         return read_json(p) if p.exists() else {}
 
     @property
+    def usage_unknown(self) -> bool:
+        """True when spend happened but could not be measured.
+
+        Distinct from zero: `cost_usd: 0.0` is a measurement, `None` is the
+        absence of one, and folding the second into the first is how budget
+        accounting quietly stops being true.
+        """
+        u = self.usage
+        return bool(u.get("usage_unknown")) or u.get("cost_usd") is None
+
+    @property
     def patch(self) -> str:
         p = self.dir / "patch.diff"
         return p.read_text(encoding="utf-8") if p.exists() else ""
@@ -88,8 +137,6 @@ class Bundle:
         return read_json(p) if p.exists() else {}
 
     def events(self):
-        from af.exec import read_events
-
         p = self.dir / "events.jsonl"
         if not p.exists():
             return iter(())

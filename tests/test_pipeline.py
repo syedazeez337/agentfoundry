@@ -63,12 +63,17 @@ SMOKE = {
 # templates, so the run contains both successes and failures. A design where
 # every arm scores 1.0 would pass no matter what broke downstream.
 N_TASKS = 6
+# Re-pinned when EnvironmentSpec gained `require_enforcement`. That field is
+# hashed, so env_hash -> trial_key changed, and the scripted backend seeds its
+# RNG from trial_key (af/exec/adapters/scripted.py). Every simulated trial drew
+# a different sample from the same generator: the verdict label and the
+# credibility split are unchanged, only the draw moved.
 EXPECTED = {
     "n_trials": 24,
     "result": "INCONCLUSIVE",
-    "baseline_rate": 0.9167,
+    "baseline_rate": 0.7500,
     "candidate_rate": 1.0000,
-    "delta": 0.0833,
+    "delta": 0.2500,
 }
 
 

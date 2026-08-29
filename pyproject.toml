@@ -28,3 +28,27 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["af"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [".venv", "build", "dist"]
+
+[tool.ruff.lint]
+# Correctness first. Style rules that would churn the existing codebase are off:
+# this gate exists to catch real defects, not to reformat working code.
+select = ["E", "F", "W", "B", "S", "UP"]
+ignore = [
+    "E501",    # line length is a judgement call, not a hard stop
+    "B008",    # function call in default arg: not misused here
+    # This project's whole purpose is running subprocesses and fetching URLs in a
+    # sandbox. Flagging every such call would train us to ignore the linter.
+    # The real controls are af/env's containment and the adversarial test tier.
+    "S603", "S607", "S310", "S311", "S608",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately exercise hostile and insecure inputs.
+"tests/*" = ["S", "B011"]
+# The demo writes fixture source as string literals.
+"af/demo.py" = ["S"]

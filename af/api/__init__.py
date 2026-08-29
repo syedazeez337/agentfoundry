@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlparse
 from af import ANALYSIS_VERSION
 from af.evidence import iter_bundles, load_bundle
 from af.store import Store
-from af.util import Paths, short
+from af.util import Paths
 
 
 def _routes(root: Path):
@@ -148,31 +148,38 @@ async function showClusters(){
      <td class=dim>${x.description}</tr>`).join('')}</table>
    <p class=dim>${c.calibration.note}</p>`;
 }
+// Everything rendered here originates from a trial: a task instruction, a
+// model's output, a shell command an agent chose. Interpolating any of it
+// into innerHTML unescaped makes an evidence viewer execute the evidence.
+function esc(v){
+  return String(v==null?'':v).replace(/[&<>"']/g, c=>(
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
 async function showLandscape(){
   const l=await get('/api/landscape');
   $('#view').innerHTML=`<h1>decision landscape</h1>
    <h2>traps</h2><table><tr><th>state<th>visits<th>success</tr>
-   ${l.traps.map(n=>`<tr><td>${n.state}<td>${n.visits}<td>${n.success_rate}</tr>`).join('')}</table>
+   ${l.traps.map(n=>`<tr><td>${esc(n.state)}<td>${esc(n.visits)}<td>${esc(n.success_rate)}</tr>`).join('')}</table>
    <h2>productive</h2><table><tr><th>state<th>visits<th>success</tr>
-   ${l.productive.map(n=>`<tr><td>${n.state}<td>${n.visits}<td>${n.success_rate}</tr>`).join('')}</table>`;
+   ${l.productive.map(n=>`<tr><td>${esc(n.state)}<td>${esc(n.visits)}<td>${esc(n.success_rate)}</tr>`).join('')}</table>`;
 }
 async function showTrials(){
   const t=await get('/api/trials');
   $('#view').innerHTML=`<h1>trials</h1><table>
    <tr><th>key<th>task<th>arch<th>status<th>wall<th>cost</tr>
-   ${t.map(x=>`<tr onclick="showTrial('${x.trial_key}')"><td>${x.trial_key.slice(0,12)}
-     <td>${x.task}<td>${x.arch}<td>${x.status}<td>${x.wall_s}<td>$${x.cost_usd}</tr>`).join('')}
+   ${t.map(x=>`<tr onclick="showTrial('${esc(x.trial_key)}')"><td>${esc(x.trial_key.slice(0,12))}
+     <td>${esc(x.task)}<td>${esc(x.arch)}<td>${esc(x.status)}<td>${esc(x.wall_s)}<td>$${esc(x.cost_usd)}</tr>`).join('')}
    </table>`;
 }
 async function showTrial(k){
   const t=await get('/api/trial?id='+k);
-  $('#view').innerHTML=`<h1>${k.slice(0,12)}</h1>
-   <p class=dim>${t.manifest.task.instruction}</p>
-   <h2>score</h2><pre>${JSON.stringify(t.score&&t.score.outcomes,null,1)}</pre>
-   <h2>integrity</h2><pre>${JSON.stringify(t.integrity,null,1)}</pre>
-   <h2>events (${t.events.length})</h2>
-   <pre>${t.events.map(e=>e.seq+' '+e.type+' '+JSON.stringify(e.attrs)).join('\\n')}</pre>
-   <h2>patch</h2><pre>${(t.patch||'(none)').replace(/</g,'&lt;')}</pre>`;
+  $('#view').innerHTML=`<h1>${esc(k.slice(0,12))}</h1>
+   <p class=dim>${esc(t.manifest.task.instruction)}</p>
+   <h2>score</h2><pre>${esc(JSON.stringify(t.score&&t.score.outcomes,null,1))}</pre>
+   <h2>integrity</h2><pre>${esc(JSON.stringify(t.integrity,null,1))}</pre>
+   <h2>events (${esc(t.events.length)})</h2>
+   <pre>${t.events.map(e=>esc(e.seq+' '+e.type+' '+JSON.stringify(e.attrs))).join('\\n')}</pre>
+   <h2>patch</h2><pre>${esc(t.patch||'(none)')}</pre>`;
 }
 boot();
 </script>

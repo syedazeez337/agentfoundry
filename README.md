@@ -111,6 +111,7 @@ af search race --base minimal-bash   # racing with statistical elimination
 af search archive                    # behaviour-keyed archive, not a leaderboard
 
 af reindex                           # rebuild the DB from evidence
+af reconcile                         # adopt sealed bundles, release stalled leases
 af serve                             # read-mostly UI on :8787
 ```
 
@@ -174,15 +175,63 @@ estimates while still counting it in the report.
   (capability vs difficulty, lucky passes, oracle attempts, cost multipliers).
   It is a fixture, not a claim about the world.
 - **`llm-bash`** - a real single-tool agent loop over Anthropic or OpenAI, stdlib
-  only. Set `ANTHROPIC_API_KEY` and point an architecture's `runtime.backend` at
-  it. Refuses loudly without a key rather than degrading silently.
+  only. Point an architecture's `runtime.backend` at it and supply a credential
+  either way `af auth` accepts - an environment variable or `af auth add`; the
+  backend resolves through `af/auth.py` rather than reading the environment
+  itself, so `af doctor` and the runner cannot disagree about whether you are
+  ready. Refuses loudly without a key rather than degrading silently.
 
 Adding a backend is five methods plus passing `af backends` conformance.
+
+## Enforcement is recorded, not assumed
+
+A sandbox does not get to claim a control. It declares, per axis, how strongly
+it can back one, and that declaration is what lands in `integrity.json`:
+
+| Level | Meaning |
+|---|---|
+| `kernel` | the OS refuses the operation |
+| `advisory` | only cooperating software honours it |
+| `unenforced` | requested, nothing backs it |
+
+`--sandbox local` reports `advisory` for both filesystem and network, because
+proxy variables stop a cooperating HTTP client and do not stop a raw socket.
+`--sandbox docker` reports `kernel` for both. An experiment states the strength
+it *requires* in `EnvironmentSpec.require_enforcement` - part of the spec, so
+part of the preregistration - and `--require-enforcement kernel` refuses to run
+at all rather than quietly producing a weaker result:
+
+```
+error: environment requires enforcement='kernel' but sandbox 'local' provides
+       {'filesystem': 'advisory', 'network': 'advisory', 'is_security_boundary': False}
+```
+
+Secrets are redacted on the way into the event log rather than on the way out,
+and the bundle records which classes were matched. Like the network control,
+this is a blocklist and is labelled as one.
+
+## Tests
+
+Organised by failure mode, not by module:
+
+| Tier | Asks |
+|---|---|
+| `tests/` | does it work? |
+| `tests/conformance/` | does *every* implementation satisfy the contract? |
+| `tests/adversarial/` | does hostile input fail safely, and is the record honest? |
+| `tests/hardening/` | do the architectural claims still hold? |
+
+The last two are the admissibility contract turned on the platform itself. A
+grader is not trusted here until a null patch and a cheat patch have been thrown
+at it; the sandbox, the scheduler and the layering now face the same standard.
+`tests/hardening` fails the build if a module outside the CLI boundary reads
+`os.environ`, or if a layer imports one below it.
 
 ## Status
 
 Every layer is implemented and exercised by `af demo run`. Sandboxing defaults to
 process isolation (`--sandbox local`), which is a lifecycle boundary and not a
-security one; `--sandbox docker` is the real boundary. The failure labeler is
-**uncalibrated** and says so on every output - calibrating it against labelled
-trajectory corpora is the next piece of work.
+security one; `--sandbox docker` is the real boundary, and even that assumes a
+misbehaving agent rather than an attacker with a kernel exploit. The failure
+labeler is **uncalibrated** and says so on every output - calibrating it against
+labelled trajectory corpora is the next piece of work.

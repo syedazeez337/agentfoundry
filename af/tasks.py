@@ -50,6 +50,24 @@ class RepoTask:
         ]
 
 
+class UnsafeRefError(ValueError):
+    """A repo or commit value git would read as an option rather than data."""
+
+
+def _reject_option_like(kind: str, value: str) -> str:
+    """Refuse values git would parse as a flag.
+
+    argv lists close off shell injection but not argument injection: git reads
+    a leading `-` as an option wherever it appears, so a dataset-supplied
+    `--upload-pack=...` becomes a command rather than a repository. Task
+    metadata arrives from SWE-bench-Live, not only from an operator, so this is
+    validated rather than trusted.
+    """
+    if value.startswith("-"):
+        raise UnsafeRefError(f"{kind} {value!r} would be read by git as an option")
+    return value
+
+
 def _git(argv: list[str], cwd: Path, timeout: int = 600) -> str:
     p = subprocess.run(["git", *argv], cwd=str(cwd), capture_output=True,
                        text=True, timeout=timeout)
@@ -71,6 +89,9 @@ def clone_at_commit(repo: str, commit: str, dest: Path,
         shutil.rmtree(dest, ignore_errors=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
+    _reject_option_like("repo", repo)
+    if commit:
+        _reject_option_like("commit", commit)
     url = repo if repo.startswith("http") else f"https://github.com/{repo}.git"
     tmp = Path(tempfile.mkdtemp(prefix="af-clone-"))
     try:

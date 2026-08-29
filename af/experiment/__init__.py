@@ -8,17 +8,18 @@ is an input to execution rather than a later step.
 from __future__ import annotations
 
 import json
-import socket
 import os
+import socket
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from af import ANALYSIS_VERSION, FOUNDRY_VERSION
-from af.evidence import Bundle, iter_bundles, load_bundle
+from af.evidence import Bundle
 from af.exec import get_backend, run_trial
 from af.grade import score_bundle
 from af.spec.models import (
-    ArchitectureSpec, Budget, EnvironmentSpec, ExperimentSpec, TaskSpec, TrialSpec,
+    ArchitectureSpec, EnvironmentSpec, ExperimentSpec, TaskSpec, TrialSpec,
 )
 from af.spec.registry import resolve
 from af.store import Store
@@ -167,20 +168,83 @@ def plan_experiment(root: Path, spec: ExperimentSpec,
 # -------------------------------------------------------------- scheduler
 
 
+def _last_progress_ts(bundle_dir: Path) -> float | None:
+    """When this trial last produced evidence, or None if it never has."""
+    events = Path(bundle_dir) / "events.jsonl"
+    for candidate in (events, Path(bundle_dir) / "manifest.json"):
+        try:
+            return candidate.stat().st_mtime
+        except OSError:
+            continue
+    return None
+
+
+def _stalled(bundle_dir: Path, stall_s: float) -> bool:
+    last = _last_progress_ts(bundle_dir)
+    if last is None:
+        # No bundle at all: the trial never started, so there is nothing to
+        # call stalled. Lease expiry is the right mechanism for that case.
+        return False
+    return (time.time() - last) > stall_s
+
+
 class Scheduler:
     """Deliberately boring. Table + leases + heartbeat + budget guard.
 
-    Infrastructure failures retry once. Agent failures never retry - a failed
-    agent run is data.
+    A failed agent run is data and is never retried. An infrastructure failure
+    is not data: it is filed as "errored", excluded from the estimates, and
+    counted in the report. Re-running the experiment re-runs those trials,
+    because `run_trial` only treats a *successfully* sealed bundle as evidence
+    it already owns.
     """
 
     def __init__(self, store: Store, root: Path, bundles: Path,
-                 sandbox_kind: str = "local"):
+                 sandbox_kind: str = "local", require_enforcement: str = "none"):
         self.store = store
         self.root = Path(root)
         self.bundles = Path(bundles)
         self.sandbox_kind = sandbox_kind
+        self.env = EnvironmentSpec(require_enforcement=require_enforcement)
         self.worker = f"{socket.gethostname()}:{os.getpid()}"
+
+    # ------------------------------------------------------------ reconcile
+
+    def reconcile(self, exp_hash: str | None = None,
+                  stall_s: float = 900.0) -> dict:
+        """Rebuild queue state from the evidence plane.
+
+        The control plane is disposable - `af reindex` already rebuilds the
+        whole database from bundles - but that was only ever a recovery
+        command. Running the same idea as a supervision step means the
+        scheduler trusts what is on disk rather than what it remembers, so a
+        crash between sealing a bundle and updating the row costs nothing, and
+        a re-run does not pay again for work already done.
+
+        Two things are decided here:
+
+        - a queued or leased trial whose bundle is already sealed is *adopted*,
+          not re-run. Seal status decides whether that is `sealed` or
+          `errored`, exactly as in `drain`.
+        - a leased trial with no new event for `stall_s` is released back to
+          the queue. Lease expiry alone only catches a worker that stopped
+          renewing; this catches one that is alive and wedged, because it asks
+          for evidence of progress rather than evidence of a heartbeat.
+        """
+        adopted = 0
+        released = 0
+        rows = self.store.trials_in_states(("queued", "leased"), exp_hash)
+        for row in rows:
+            bundle_dir = self.bundles / row["trial_key"]
+            b = Bundle(bundle_dir)
+            if b.sealed:
+                self.store.finish_trial(
+                    row["trial_key"], "sealed" if b.ok else "errored",
+                    str(bundle_dir), b.seal.get("error"))
+                adopted += 1
+            elif row["state"] == "leased" and _stalled(bundle_dir, stall_s):
+                self.store.release_trial(row["trial_key"])
+                released += 1
+        return {"adopted": adopted, "released": released, "examined": len(rows)}
 
     def submit(self, spec: ExperimentSpec, plan: Plan) -> str:
         for arch in plan.architectures:
@@ -197,10 +261,15 @@ class Scheduler:
         """Run queued trials to completion in this process."""
         done = 0
         spent = 0.0
+        unknown_spend = 0
         cap = None
         if exp_hash:
             exp = self.store.get_experiment(exp_hash)
             cap = (json.loads(exp["budget"]) or {}).get("max_cost_usd") if exp else None
+
+        # Reconcile before dispatching anything: work that is already on disk
+        # must not be paid for a second time.
+        reconciled = self.reconcile(exp_hash)
 
         tasks_by_id = {t.id: t for t in load_suite(self.root, "*")}
         arch_cache: dict[str, ArchitectureSpec] = {}
@@ -231,18 +300,25 @@ class Scheduler:
                                           row["trial_key"])
                 ts = TrialSpec(
                     task_id=task.id, task_hash=task.hash, arch_hash=arch.hash,
-                    env_hash=EnvironmentSpec().hash,
+                    env_hash=self.env.hash,
                     models={k: v.to_dict() for k, v in arch.models.items()},
                     budget=arch.budget.to_dict(), nonce=spec_row["nonce"],
                 )
-                bundle_dir = run_trial(ts, task, arch, EnvironmentSpec(),
+                bundle_dir = run_trial(ts, task, arch, self.env,
                                        self.bundles, self.sandbox_kind)
                 b = Bundle(bundle_dir)
-                spent += float(b.usage.get("cost_usd") or 0.0)
-                self.store.finish_trial(row["trial_key"], "sealed", str(bundle_dir),
-                                        b.seal.get("error"))
+                if b.usage_unknown:
+                    unknown_spend += 1
+                else:
+                    spent += float(b.usage.get("cost_usd") or 0.0)
+                # A bundle sealed with status="error" is an infrastructure
+                # record, not an agent run. Filing it as "sealed" put provider
+                # outages into the pass/fail rates as ordinary agent failures.
+                self.store.finish_trial(
+                    row["trial_key"], "sealed" if b.ok else "errored",
+                    str(bundle_dir), b.seal.get("error"))
             except Exception as exc:  # noqa: BLE001
-                self.store.finish_trial(row["trial_key"], "failed", None, str(exc))
+                self.store.finish_trial(row["trial_key"], "errored", None, str(exc))
 
             done += 1
             if on_progress:
@@ -252,7 +328,10 @@ class Scheduler:
             counts = self.store.counts_by_state(exp_hash)
             if counts.get("queued", 0) == 0 and counts.get("leased", 0) == 0:
                 self.store.set_experiment_state(exp_hash, "complete")
-        return {"ran": done, "spent_usd": round(spent, 4)}
+        return {"ran": done, "spent_usd": round(spent, 4),
+                "trials_with_unknown_spend": unknown_spend,
+                "adopted": reconciled["adopted"],
+                "released": reconciled["released"]}
 
 
 # ---------------------------------------------------------------- scoring
@@ -308,6 +387,12 @@ def analyze_experiment(store: Store, exp_hash: str) -> dict:
     margin = float(analysis.get("equivalence_margin", 0.05))
 
     trials = store.trials_for_experiment(exp["hash"])
+    # Excluded from the estimates, counted in the report - the same treatment
+    # disqualifying integrity flags already get.
+    execution_counts: dict[str, int] = {}
+    for t in trials:
+        st = t["state"] or "unknown"
+        execution_counts[st] = execution_counts.get(st, 0) + 1
     keys = [t["trial_key"] for t in trials]
     scores = store.get_scores(keys, ANALYSIS_VERSION)
 
@@ -369,7 +454,7 @@ def analyze_experiment(store: Store, exp_hash: str) -> dict:
         pvals.append(1.0 if insufficient else paired.p_value)
 
     rejects = stats.benjamini_hochberg(pvals) if pvals else []
-    for c, r in zip(comparisons, rejects):
+    for c, r in zip(comparisons, rejects, strict=False):
         c["significant_after_fdr"] = bool(r)
 
     # ---- verdict
@@ -413,6 +498,7 @@ def analyze_experiment(store: Store, exp_hash: str) -> dict:
         "arms": estimates,
         "comparisons": comparisons,
         "credibility": credibility_counts,
+        "execution": execution_counts,
         "n_tasks": n_tasks,
         "minimum_detectable_effect": mde,
         "equivalence_margin": margin,

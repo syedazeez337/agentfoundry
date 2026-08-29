@@ -18,7 +18,6 @@ import urllib.error
 import urllib.request
 
 from af.exec import RunOutcome, TrialContext, register_backend
-from af.env import PYTHON
 
 SYSTEM = """You are a software engineer working in a repository.
 You have exactly one tool: a shell. Emit exactly one command per reply inside
@@ -50,10 +49,11 @@ class LlmBashBackend:
 
     def provision(self, ctx: TrialContext) -> None:
         model = ctx.arch.models.get("default", {})
-        if model.get("provider") == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
-            raise RuntimeError("llm-bash needs ANTHROPIC_API_KEY")
-        if model.get("provider") == "openai" and not os.environ.get("OPENAI_API_KEY"):
-            raise RuntimeError("llm-bash needs OPENAI_API_KEY")
+        # Resolve through af.auth rather than reading the environment. Reading
+        # it directly meant `af auth add` could store a key and `af doctor`
+        # could report READY while the run still died for want of a variable:
+        # two credential systems, one of which the runner did not use.
+        _credential(model)
         ctx.sink.emit("agent.start", agent_id="root", role="implement",
                       model=model.get("id"))
 
@@ -146,6 +146,25 @@ class LlmBashBackend:
 # ------------------------------------------------------------------ helpers
 
 
+def _credential(model: dict):
+    """The one path to a key, with af.auth's stated precedence.
+
+    Raises with the provider's own guidance rather than naming a single
+    environment variable, because a stored credential is equally valid.
+    """
+    from af import auth
+
+    provider = model.get("provider", "anthropic")
+    cred = auth.resolve(provider)
+    if not cred.available:
+        raise RuntimeError(
+            f"llm-bash needs a {provider} credential. Set one of "
+            f"{', '.join(cred.provider.env) or '(none)'} or run "
+            f"`af auth add --provider {provider} <key>`."
+        )
+    return cred
+
+
 def _task_prompt(ctx: TrialContext) -> str:
     return (
         f"Repository is the current working directory.\n\n"
@@ -155,11 +174,18 @@ def _task_prompt(ctx: TrialContext) -> str:
 
 
 def _extract_command(text: str) -> str | None:
+    """The whole fenced block, not its first line.
+
+    `_shell` runs the result through `sh -c`, which handles a heredoc, a loop
+    or a multi-line edit perfectly well. Taking only the first line silently
+    dropped the rest of what the model asked for and reported the truncated
+    fragment's exit code as the result of the whole command.
+    """
     m = re.search(r"```(?:bash|sh)?\s*\n(.*?)```", text, re.S)
     if not m:
         return None
     cmd = m.group(1).strip()
-    return cmd.splitlines()[0].strip() if cmd else None
+    return cmd or None
 
 
 def _looks_like_test(cmd: str) -> bool:
@@ -211,7 +237,7 @@ def _anthropic(model: dict, system: str, messages: list[dict]) -> tuple[str, dic
         "https://api.anthropic.com/v1/messages",
         {
             "content-type": "application/json",
-            "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+            "x-api-key": _credential(model).key,
             "anthropic-version": "2023-06-01",
         },
         body,
@@ -227,7 +253,7 @@ def _openai(model: dict, system: str, messages: list[dict]) -> tuple[str, dict]:
     data = _post(
         "https://api.openai.com/v1/chat/completions",
         {"content-type": "application/json",
-         "authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
+         "authorization": f"Bearer {_credential(model).key}"},
         {"model": model["id"],
          "messages": [{"role": "system", "content": system}, *messages]},
     )

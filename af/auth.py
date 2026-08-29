@@ -32,7 +32,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from collections.abc import Iterable
 
 from af.util import now_iso, write_json
 

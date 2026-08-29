@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          # `uv` builds the per-task Python environments that make Docker
+          # optional, so `af doctor` treats it as a real-run requirement. CI
+          # has to provide what a real run actually needs, or the readiness
+          # checks are being tested against a machine that cannot do the work.
+          pip install -e . uv
+      - name: Test
+        run: python -m unittest discover -s tests -t . -v
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . ruff
+      - name: Ruff
+        run: ruff check af tests

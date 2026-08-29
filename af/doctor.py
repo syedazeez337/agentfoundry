@@ -112,11 +112,18 @@ def check_sqlite() -> Check:
 
 
 def check_workspace(root: Path) -> Check:
+    """Probe writability without scaffolding the project.
+
+    This used to call `Paths.ensure()`, which also creates `architectures/`,
+    `tasks/` and `experiments/` in the project root. That is `af init`'s job.
+    An audit that silently scaffolds directories is a side effect nobody asked
+    for, and it makes the audit non-repeatable on a fresh tree.
+    """
     from af.util import Paths
 
     p = Paths(root)
     try:
-        p.ensure()
+        p.state.mkdir(parents=True, exist_ok=True)
         probe = p.state / ".doctor-probe"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink()
@@ -334,14 +341,23 @@ def check_uv() -> Check:
 
 
 def check_anthropic_sdk() -> Check:
+    """The vendor SDK is an option, not a requirement.
+
+    `af/exec/adapters/llm_bash.py` speaks to both providers over `urllib` and
+    imports nothing outside the stdlib, so no code path in this project needs
+    the SDK. Tiering it REAL blocked real runs on a package nothing imports,
+    and blocked them for a non-Anthropic key that could never need it.
+    """
     try:
         import anthropic  # noqa: F401
 
-        return Check("anthropic SDK", REAL, PASS,
+        return Check("anthropic SDK", OPT, PASS,
                      f"v{getattr(anthropic, '__version__', '?')}")
     except ImportError:
-        return Check("anthropic SDK", REAL, FAIL, "not installed",
-                     "uv pip install anthropic")
+        return Check(
+            "anthropic SDK", OPT, INFO, "not installed",
+            "optional. The llm-bash backend calls the HTTP API directly with "
+            "urllib; install it only if you add a backend that wants it.")
 
 
 def check_api_keys() -> Check:
@@ -413,10 +429,11 @@ def run_all(root: Path,
         checks += [check_local_sandbox(root), check_unittest_runner(),
                    check_backends(), check_resources()]
     if REAL in tiers:
-        checks += [check_git(), check_uv(), check_anthropic_sdk(),
+        checks += [check_git(), check_uv(),
                    check_api_keys(), check_network(), check_hf_datasets()]
     if OPT in tiers:
-        checks += [check_docker(), check_docker_daemon(), check_wsl()]
+        checks += [check_docker(), check_docker_daemon(), check_wsl(),
+                   check_anthropic_sdk()]
     return checks
 
 

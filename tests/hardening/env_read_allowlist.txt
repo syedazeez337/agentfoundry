@@ -1,0 +1,23 @@
+# Modules permitted to read process environment variables directly.
+#
+# Everything else must receive configuration from a value passed in, so that
+# what a run depended on is visible in one place instead of being read from
+# ambient state at arbitrary depth. Adding a line here is a decision; it should
+# come with a reason.
+#
+# af/auth.py    - the credential boundary itself. Its entire job is resolving
+#                 provider keys, and it is the only module allowed to hold a
+#                 raw one.
+# af/config.py  - the run-configuration boundary: reads the environment once,
+#                 at the edge, and hands down a value.
+# af/env/__init.py - builds the *child* process environment. It reads a fixed
+#                 passthrough list (HOME, PATH, SYSTEMROOT...) that the child
+#                 cannot start without.
+# af/doctor.py  - reports on the environment; reading it is the feature.
+# af/cli/       - the process edge, where argv and environ are turned into
+#                 values.
+af/auth.py
+af/config.py
+af/env/__init__.py
+af/doctor.py
+af/cli/main.py

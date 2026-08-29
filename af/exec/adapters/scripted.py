@@ -18,7 +18,7 @@ import json
 import math
 from pathlib import Path
 
-from af.exec import Backend, RunOutcome, TrialContext, register_backend
+from af.exec import RunOutcome, TrialContext, register_backend
 from af.util import seeded_rng
 
 
@@ -69,7 +69,7 @@ class ScriptedBackend:
 
         # --- exploration
         n_explore = 3 + (4 if has_research else 0) + int(rng.random() * 3)
-        for i in range(n_explore):
+        for _ in range(n_explore):
             tokens += self._model_turn(ctx, rng, "explore", 1400, arch)
             cmd = rng.choice(["ls -R", "grep -rn def src", "cat src/mod.py",
                               "sed -n 1,80p src/mod.py"])
@@ -187,8 +187,10 @@ class ScriptedBackend:
     # ------------------------------------------------------ collect/normalize
 
     def collect(self, ctx: TrialContext) -> dict:
-        return {"backend": self.name, "version": self.version,
-                "integrity": {"oracle_attempts": [], "git_ops": []}}
+        # Integrity is reported through invoke()'s RunOutcome.raw, where it is
+        # actually observed. Returning empty lists here claimed to be the
+        # channel and was not.
+        return {"backend": self.name, "version": self.version}
 
     def normalize(self, raw: dict, sink) -> None:
         return None

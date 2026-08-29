@@ -12,9 +12,7 @@ Search proposes; only experiments conclude.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Protocol
 
 from af.experiment import stats
@@ -171,10 +169,14 @@ class Race:
         self.base = base
         self.alpha = alpha
         self.candidates: list[Candidate] = []
+        self.rejected: list[dict] = []
         for p in proposals:
             try:
                 arch = apply_operators(base, p.operators)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                # A proposal that will not resolve is a fact about the proposer,
+                # not noise to discard.
+                self.rejected.append({"operators": p.operators, "error": str(exc)})
                 continue
             self.candidates.append(Candidate(arch, p))
         self.rounds: list[dict] = []

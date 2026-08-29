@@ -69,7 +69,7 @@ class TestCanonicalShape(unittest.TestCase):
 
     def test_environment_keys(self):
         self.assertEqual(sorted(EnvironmentSpec().to_dict()),
-                         ["allowlist", "image", "net"])
+                         ["allowlist", "image", "net", "require_enforcement"])
 
     def test_trial_keys(self):
         ts = TrialSpec(task_id="t", task_hash="a" * 64, arch_hash="b" * 64,
