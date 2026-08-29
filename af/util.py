@@ -8,7 +8,7 @@ import os
 import random
 import re
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any
 
@@ -33,11 +33,11 @@ def short(h: str, n: int = 8) -> str:
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def now_ts() -> float:
-    return datetime.now(timezone.utc).timestamp()
+    return datetime.now(UTC).timestamp()
 
 
 def slugify(s: str) -> str:
@@ -92,7 +92,7 @@ class Paths:
         self.tasks = self.root / "tasks"
         self.experiments = self.root / "experiments"
 
-    def ensure(self) -> "Paths":
+    def ensure(self) -> Paths:
         for p in (
             self.state,
             self.bundles,
@@ -140,8 +140,23 @@ def unified_diff(before: dict[str, str], after: dict[str, str]) -> str:
     return "".join(out)
 
 
+BINARY_MARK = "<binary"
+
+
+def binary_marker(data: bytes) -> str:
+    """A stand-in for binary content: identity without the bytes."""
+    return f"{BINARY_MARK} sha256:{sha256_hex(data)[:32]} len:{len(data)}>"
+
+
 def snapshot_tree(root: Path, skip: tuple[str, ...] = ("__pycache__", ".git", ".pytest_cache")) -> dict[str, str]:
-    """Read a directory tree into {relpath: text}. Binary files are skipped."""
+    """Read a directory tree into {relpath: text}.
+
+    Binary files are represented by a content digest rather than dropped.
+    Dropping them made them invisible to `files_changed`, to the integrity
+    record and to the tampering grader, so an agent could write a compiled
+    artifact or an encoded payload and leave no trace in the evidence. A
+    digest keeps the diff readable while making the change detectable.
+    """
     snap: dict[str, str] = {}
     root = Path(root)
     for p in sorted(root.rglob("*")):
@@ -151,7 +166,15 @@ def snapshot_tree(root: Path, skip: tuple[str, ...] = ("__pycache__", ".git", ".
         if any(part in skip for part in rel.split("/")):
             continue
         try:
-            snap[rel] = p.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
+            raw = p.read_bytes()
+        except OSError:
             continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            snap[rel] = binary_marker(raw)
+            continue
+        # A NUL byte decodes cleanly as UTF-8 but is not text, and inlining it
+        # into a diff produces an unreadable patch. Same heuristic git uses.
+        snap[rel] = binary_marker(raw) if "\x00" in text else text
     return snap

@@ -12,7 +12,7 @@ only ever discover growth.
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Callable
+from collections.abc import Callable
 
 from af.spec.models import ArchitectureSpec, Budget, ModelBinding, SlotBinding
 

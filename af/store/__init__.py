@@ -11,7 +11,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from collections.abc import Iterator
 
 from af.util import now_iso
 
@@ -184,6 +184,25 @@ class Store:
             )
             return dict(row)
 
+    def release_trial(self, trial_key: str) -> None:
+        """Return a trial to the queue, dropping whatever lease it held."""
+        self.conn.execute(
+            "UPDATE trial SET state='queued', worker=NULL, lease_until=NULL "
+            "WHERE trial_key=?", (trial_key,))
+
+    def trials_in_states(self, states: tuple[str, ...],
+                         exp_hash: str | None = None) -> list[dict]:
+        marks = ",".join("?" for _ in states)
+        if exp_hash:
+            return [dict(r) for r in self.q(
+                f"SELECT t.* FROM trial t "
+                f"JOIN experiment_trial et ON et.trial_key = t.trial_key "
+                f"WHERE et.experiment_hash=? AND t.state IN ({marks}) "
+                f"ORDER BY t.created_at", exp_hash, *states)]
+        return [dict(r) for r in self.q(
+            f"SELECT * FROM trial WHERE state IN ({marks}) ORDER BY created_at",
+            *states)]
+
     def finish_trial(self, trial_key: str, state: str, bundle_path: str | None = None,
                      error: str | None = None) -> None:
         self.conn.execute(
@@ -331,20 +350,24 @@ def reindex(store: Store, bundles_root: Path, tasks_root: Path,
     from af.spec.models import ArchitectureSpec, TaskSpec
 
     counts = {"architectures": 0, "tasks": 0, "trials": 0}
+    # A rebuild that silently drops an unreadable file is not a trustworthy
+    # rebuild. Skips are counted and named so "reindex succeeded" means
+    # something.
+    skipped: list[dict] = []
 
     for p in sorted(Path(arch_root).glob("**/*.yaml")):
         try:
             store.put_architecture(ArchitectureSpec.load(p))
             counts["architectures"] += 1
-        except Exception:
-            continue
+        except Exception as exc:  # noqa: BLE001
+            skipped.append({"kind": "architecture", "path": str(p), "error": str(exc)})
 
     for p in sorted(Path(tasks_root).glob("**/task.yaml")):
         try:
             store.put_task(TaskSpec.load(p.parent))
             counts["tasks"] += 1
-        except Exception:
-            continue
+        except Exception as exc:  # noqa: BLE001
+            skipped.append({"kind": "task", "path": str(p), "error": str(exc)})
 
     for b in iter_bundles(bundles_root):
         m = b.manifest
@@ -355,9 +378,11 @@ def reindex(store: Store, bundles_root: Path, tasks_root: Path,
             "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (b.trial_key, t.get("task_hash"), m["task"]["id"],
              m["architecture"]["arch_hash"], t.get("nonce", 0),
-             "sealed" if b.sealed else "running", str(b.dir),
+             ("sealed" if b.ok else "errored") if b.sealed else "running", str(b.dir),
              m.get("started_at"), b.seal.get("sealed_at"), b.seal.get("error")),
         )
         counts["trials"] += 1
 
+    counts["skipped"] = len(skipped)
+    counts["skipped_detail"] = skipped
     return counts

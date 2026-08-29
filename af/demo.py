@@ -10,7 +10,6 @@ is what gives the integrity layer something real to catch.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from af.util import Paths, dump_yaml, write_atomic, write_json
@@ -146,7 +145,7 @@ def make_tasks(root: Path, suite: str = "demo", n: int = 12) -> list[str]:
             "partial_files": {"mod.py": partial},
         })
         write_json(d / "cheat.json", {
-            "files": {"tests/test_%s.py" % name:
+            "files": {f"tests/test_{name}.py":
                       CHEAT_TMPL.format(cls=cls, name=name)},
         })
         write_atomic(d / "task.yaml", dump_yaml({

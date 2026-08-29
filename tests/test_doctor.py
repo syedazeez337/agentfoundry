@@ -10,11 +10,13 @@ need.
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
 from af import doctor
-from af.doctor import CORE, FAIL, INFO, OPT, PASS, REAL, SIM, SKIP, WARN
+from af.doctor import CORE, FAIL, INFO, OPT, PASS, REAL, SIM, SKIP
 
 
 class TestTierAssignment(unittest.TestCase):
@@ -37,6 +39,12 @@ class TestTierAssignment(unittest.TestCase):
 
     def test_git_is_required_for_real_runs(self):
         self.assertEqual(doctor.check_git().tier, REAL)
+
+    def test_vendor_sdk_is_optional_not_required(self):
+        """Nothing in the project imports it; llm-bash uses urllib only."""
+        c = doctor.check_anthropic_sdk()
+        self.assertEqual(c.tier, OPT, "must not gate real runs")
+        self.assertIn(c.status, (PASS, INFO, SKIP))
 
 
 class TestReadiness(unittest.TestCase):
@@ -87,11 +95,23 @@ class TestChecksAreHonest(unittest.TestCase):
 
     def test_no_check_mutates_the_system(self):
         """Every check is read-only apart from the workspace probe, which
-        cleans up after itself."""
-        before = set(Path.cwd().iterdir())
-        doctor.run_all(Path.cwd())
-        self.assertEqual(before | {Path.cwd() / ".agentfoundry"},
-                         set(Path.cwd().iterdir()) | {Path.cwd() / ".agentfoundry"})
+        creates only the state directory and cleans up after itself.
+
+        Runs against a fresh directory on purpose. Against `Path.cwd()` this
+        passed vacuously as soon as a previous run had already created the
+        directories it was meant to catch.
+        """
+        root = Path(tempfile.mkdtemp(prefix="af-doctor-test-"))
+        self.addCleanup(shutil.rmtree, root, True)
+
+        before = set(root.iterdir())
+        doctor.run_all(root)
+        created = {p.name for p in set(root.iterdir()) - before}
+
+        self.assertLessEqual(
+            created, {".agentfoundry"},
+            f"checks scaffolded the project: {sorted(created)}. "
+            "Scaffolding is `af init`'s job, not the audit's.")
 
 
 def summary_ready(checks, key):

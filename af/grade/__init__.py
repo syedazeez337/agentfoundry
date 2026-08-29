@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Protocol
 
 from af.env import PYTHON, Limits, NetPolicy, make_sandbox

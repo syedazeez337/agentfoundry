@@ -9,6 +9,7 @@ from pathlib import Path
 
 from af import ANALYSIS_VERSION, FOUNDRY_VERSION
 from af.evidence import Bundle, iter_bundles, load_bundle
+from af.config import RunConfig
 from af.spec.models import ArchitectureSpec, EnvironmentSpec, ExperimentSpec, TaskSpec, TrialSpec
 from af.spec.operators import apply_operators, diff_architectures
 from af.spec.registry import REGISTRY, SLOTS, resolve
@@ -25,7 +26,7 @@ _COLOR = sys.stdout.isatty()
 try:  # Windows consoles default to cp1252 and choke on box drawing
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-except Exception:  # noqa: BLE001
+except Exception:  # noqa: BLE001, S110 - console encoding is cosmetic
     pass
 
 
@@ -59,12 +60,23 @@ VERDICT_COLOR = {
 
 
 class Ctx:
+    """The process edge. argv and the environment become values here and
+    nowhere else - see af/config.py and tests/hardening."""
+
     def __init__(self, args):
         self.root = project_root(Path(args.root) if args.root else None)
         self.paths = Paths(self.root)
         self.json = getattr(args, "json", False)
-        self.sandbox = getattr(args, "sandbox", "local")
+        self.config = RunConfig.from_env(args)
         self._store = None
+
+    @property
+    def sandbox(self) -> str:
+        return self.config.sandbox
+
+    @property
+    def require_enforcement(self) -> str:
+        return self.config.require_enforcement
 
     @property
     def store(self) -> Store:
@@ -87,10 +99,10 @@ class Ctx:
 def cmd_init(args) -> int:
     ctx = Ctx(args)
     ctx.paths.ensure()
-    ctx.store  # create db
+    _ = ctx.store  # touching the property creates the db
     out(f"initialized AgentFoundry at {c(str(ctx.root), BOLD)}")
     out(f"  state    {ctx.paths.state}")
-    out(f"  next     af demo scaffold")
+    out("  next     af demo scaffold")
     return 0
 
 
@@ -146,8 +158,8 @@ def cmd_demo_run(args) -> int:
 
     out("")
     out(c("pipeline complete.", BOLD))
-    out(f"  af analyze cluster           failure distribution")
-    out(f"  af search race --base minimal-bash")
+    out("  af analyze cluster           failure distribution")
+    out("  af search race --base minimal-bash")
     return 0
 
 
@@ -278,7 +290,7 @@ def cmd_arch_apply(args) -> int:
 
 
 def cmd_components(args) -> int:
-    ctx = Ctx(args)
+    Ctx(args)  # validates the working root
     for slot in SLOTS:
         out(c(f"  {slot}", BOLD))
         for comp in REGISTRY.list(slot):
@@ -307,14 +319,15 @@ def cmd_run(args) -> int:
         out(f"no task {args.task!r}")
         return 1
     task = TaskSpec.load(match)
-    env = EnvironmentSpec()
+    env = EnvironmentSpec(require_enforcement=ctx.require_enforcement)
     resolved = resolve(arch, get_backend(arch.backend).capabilities())
     ts = TrialSpec(task.id, task.hash, arch.hash, env.hash, resolved.models,
                    resolved.budget, args.nonce)
     d = run_trial(ts, task, arch, env, ctx.paths.bundles, ctx.sandbox)
     b = Bundle(d)
     ctx.store.enqueue_trial(ts)
-    ctx.store.finish_trial(ts.trial_key, "sealed", str(d), b.seal.get("error"))
+    ctx.store.finish_trial(ts.trial_key, "sealed" if b.ok else "errored",
+                           str(d), b.seal.get("error"))
     out(f"  trial {short(b.trial_key, 12)}  {b.seal.get('status')}  -> {d}")
     out(f"  {json.dumps(b.usage)}")
     if args.score:
@@ -368,7 +381,8 @@ def cmd_exp_start(args) -> int:
     ctx.sync_registry()
     spec = _load_spec(ctx, args.spec)
     plan = plan_experiment(ctx.root, spec)
-    sched = Scheduler(ctx.store, ctx.root, ctx.paths.bundles, ctx.sandbox)
+    sched = Scheduler(ctx.store, ctx.root, ctx.paths.bundles, ctx.sandbox,
+                      ctx.require_enforcement)
     exp_hash = sched.submit(spec, plan)
     out(f"  frozen      {short(exp_hash)}   "
         f"{c('(this hash IS the preregistration)', DIM)}")
@@ -528,15 +542,15 @@ def cmd_analyze_landscape(args) -> int:
     bundles, scores = _bundles_and_scores(ctx)
     if args.task:
         bundles = [b for b in bundles if b.manifest["task"]["id"] == args.task]
-    l = build_landscape(bundles, scores)
-    out(f"  {len(l['nodes'])} states from {len(bundles)} trials")
+    land = build_landscape(bundles, scores)
+    out(f"  {len(land['nodes'])} states from {len(bundles)} trials")
     out(c("  traps (states that mostly end in failure)", BOLD))
-    for n in l["traps"]:
+    for n in land["traps"]:
         out(f"    {n['state']:<34} visits={n['visits']:<5} succ={n['success_rate']:.2f}")
     out(c("  productive cores", BOLD))
-    for n in l["productive"]:
+    for n in land["productive"]:
         out(f"    {n['state']:<34} visits={n['visits']:<5} succ={n['success_rate']:.2f}")
-    emit(l, ctx.json)
+    emit(land, ctx.json)
     return 0
 
 
@@ -616,7 +630,7 @@ def cmd_search_race(args) -> int:
 
     race = Race(base, proposals, alpha=args.alpha)
     tasks = load_suite(ctx.root, args.suite)
-    env = EnvironmentSpec()
+    env = EnvironmentSpec(require_enforcement=ctx.require_enforcement)
     out(f"  base        {base.name}  {short(base.hash)}")
     out(f"  candidates  {len(race.candidates)}")
     out(f"  tasks       {len(tasks)}   rounds {args.rounds}  alpha {args.alpha}")
@@ -676,17 +690,39 @@ def cmd_search_archive(args) -> int:
 # ---- misc
 
 
+def cmd_reconcile(args) -> int:
+    """Bring the queue back in line with what is on disk."""
+    from af.experiment import Scheduler
+
+    ctx = Ctx(args)
+    sched = Scheduler(ctx.store, ctx.root, ctx.paths.bundles, ctx.sandbox,
+                      ctx.require_enforcement)
+    exp_hash = None
+    if getattr(args, "experiment_ref", None):
+        e = ctx.store.get_experiment(args.experiment_ref)
+        exp_hash = e["hash"] if e else None
+    res = sched.reconcile(exp_hash, stall_s=args.stall_s)
+    out(f"  examined  {res['examined']} queued/leased trials")
+    out(f"  adopted   {res['adopted']}  {c('already sealed on disk', DIM)}")
+    out(f"  released  {res['released']}  {c('no progress within stall window', DIM)}")
+    emit(res, ctx.json)
+    return 0
+
+
 def cmd_reindex(args) -> int:
     ctx = Ctx(args)
     res = reindex(ctx.store, ctx.paths.bundles, ctx.paths.tasks, ctx.paths.architectures)
+    skipped = res.pop("skipped_detail", [])
     out(f"  rebuilt control plane from evidence: {json.dumps(res)}")
+    for s in skipped:
+        out(c(f"    skipped {s['kind']} {s['path']}: {s['error']}", YELLOW))
     return 0
 
 
 def cmd_backends(args) -> int:
     from af.exec import conformance_check, get_backend, list_backends
 
-    ctx = Ctx(args)
+    Ctx(args)  # validates the working root
     for name in list_backends():
         b = get_backend(name)
         problems = conformance_check(b)
@@ -743,7 +779,7 @@ def cmd_doctor(args) -> int:
 def cmd_auth_add(args) -> int:
     from af import auth
 
-    ctx = Ctx(args)
+    Ctx(args)  # validates the working root
     key = args.key
     if not key:
         import getpass
@@ -859,6 +895,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--root", help="project root")
     p.add_argument("--json", action="store_true", help="also dump JSON")
     p.add_argument("--sandbox", default="local", choices=["local", "docker"])
+    p.add_argument(
+        "--require-enforcement", default="none",
+        choices=["none", "advisory", "kernel"],
+        help="refuse to run unless the sandbox can enforce isolation this "
+             "strongly (kernel means docker). Recorded in the spec, so it is "
+             "part of the preregistration.",
+    )
     sub = p.add_subparsers(dest="cmd")
 
     sub.add_parser("init").set_defaults(fn=cmd_init)
@@ -866,6 +909,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("components").set_defaults(fn=cmd_components)
     sub.add_parser("backends").set_defaults(fn=cmd_backends)
     sub.add_parser("reindex").set_defaults(fn=cmd_reindex)
+    p_rec = sub.add_parser(
+        "reconcile", help="adopt sealed bundles and release stalled leases")
+    p_rec.add_argument("experiment_ref", nargs="?")
+    p_rec.add_argument("--stall-s", type=float, default=900.0,
+                       help="release a leased trial with no new event for this long")
+    p_rec.set_defaults(fn=cmd_reconcile)
     doc = sub.add_parser("doctor")
     doc.add_argument("--tier", help="core,simulator,real (default: all)")
     doc.set_defaults(fn=cmd_doctor)

@@ -24,7 +24,7 @@ class Budget:
         return asdict(self)
 
     @staticmethod
-    def from_dict(d: dict | None) -> "Budget":
+    def from_dict(d: dict | None) -> Budget:
         d = d or {}
         return Budget(
             max_tokens=int(d.get("max_tokens", 400_000)),
@@ -44,7 +44,7 @@ class ModelBinding:
         return asdict(self)
 
     @staticmethod
-    def from_dict(d: dict) -> "ModelBinding":
+    def from_dict(d: dict) -> ModelBinding:
         return ModelBinding(
             provider=d.get("provider", "scripted"),
             id=d.get("id", "scripted-v1"),
@@ -61,7 +61,7 @@ class SlotBinding:
         return {"component": self.component, "params": dict(self.params)}
 
     @staticmethod
-    def from_dict(d: Any) -> "SlotBinding":
+    def from_dict(d: Any) -> SlotBinding:
         if isinstance(d, str):
             return SlotBinding(component=d, params={})
         return SlotBinding(component=d["component"], params=dict(d.get("params") or {}))
@@ -113,7 +113,7 @@ class ArchitectureSpec:
         return d
 
     @staticmethod
-    def from_dict(d: dict) -> "ArchitectureSpec":
+    def from_dict(d: dict) -> ArchitectureSpec:
         from af.spec.registry import SLOTS
 
         slots = {}
@@ -136,10 +136,10 @@ class ArchitectureSpec:
         )
 
     @staticmethod
-    def load(path: Path) -> "ArchitectureSpec":
+    def load(path: Path) -> ArchitectureSpec:
         return ArchitectureSpec.from_dict(load_yaml(path))
 
-    def with_slot(self, slot: str, binding: SlotBinding) -> "ArchitectureSpec":
+    def with_slot(self, slot: str, binding: SlotBinding) -> ArchitectureSpec:
         slots = dict(self.slots)
         slots[slot] = binding
         return ArchitectureSpec(
@@ -201,7 +201,7 @@ class TaskSpec:
         return hash_obj(self.canonical())
 
     @staticmethod
-    def load(task_dir: Path) -> "TaskSpec":
+    def load(task_dir: Path) -> TaskSpec:
         task_dir = Path(task_dir)
         d = load_yaml(task_dir / "task.yaml")
         return TaskSpec(
@@ -223,9 +223,17 @@ class EnvironmentSpec:
     image: str = "local:python"
     net: str = "deny"
     allowlist: tuple = ()
+    # The strength of isolation this experiment *requires*, as opposed to the
+    # strength it happens to get. Part of the spec, and therefore hashed and
+    # preregistered, because "we required kernel isolation" is a claim about the
+    # experiment. What was actually delivered is recorded separately in
+    # integrity.json; the two are different facts and are stored as such.
+    require_enforcement: str = "none"   # none | advisory | kernel
 
     def to_dict(self) -> dict:
-        return {"image": self.image, "net": self.net, "allowlist": list(self.allowlist)}
+        return {"image": self.image, "net": self.net,
+                "allowlist": list(self.allowlist),
+                "require_enforcement": self.require_enforcement}
 
     @property
     def hash(self) -> str:
@@ -328,7 +336,7 @@ class ExperimentSpec:
         return hash_obj(self.canonical())
 
     @staticmethod
-    def load(path: Path) -> "ExperimentSpec":
+    def load(path: Path) -> ExperimentSpec:
         d = load_yaml(path)
         analysis = d.get("analysis") or {}
         stopping = d.get("stopping") or {}
